@@ -180,11 +180,31 @@ bool MacWindow::pollEvents() {
                 case NSEventTypeKeyUp:
                     InputManager::keyUp([event keyCode]);
                     break;
+                case NSEventTypeFlagsChanged: {
+                    // Modifier keys (Shift, Ctrl, etc.) use flagsChanged
+                    uint16_t keyCode = [event keyCode];
+                    NSEventModifierFlags flags = [event modifierFlags];
+                    // Check if this modifier is currently pressed
+                    bool pressed = false;
+                    if (keyCode == InputManager::KEY_SHIFT)
+                        pressed = (flags & NSEventModifierFlagShift) != 0;
+                    if (pressed)
+                        InputManager::keyDown(keyCode);
+                    else
+                        InputManager::keyUp(keyCode);
+                    break;
+                }
                 case NSEventTypeMouseMoved:
                 case NSEventTypeLeftMouseDragged:
-                case NSEventTypeRightMouseDragged:
-                    InputManager::mouseMove((float)[event deltaX], (float)[event deltaY]);
+                case NSEventTypeRightMouseDragged: {
+                    NSWindow* win = (__bridge NSWindow*)m_window;
+                    NSPoint loc = [win mouseLocationOutsideOfEventStream];
+                    NSRect bounds = [[win contentView] bounds];
+                    if (NSPointInRect(loc, bounds)) {
+                        InputManager::mouseMove((float)[event deltaX], (float)[event deltaY]);
+                    }
                     break;
+                }
                 default:
                     break;
             }

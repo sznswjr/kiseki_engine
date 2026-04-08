@@ -1,6 +1,8 @@
 #import <Cocoa/Cocoa.h>
 #include <cstdio>
 #include <string>
+#include <vector>
+#include <cmath>
 #include <mach-o/dyld.h>
 
 #include "platform/MacWindow.h"
@@ -11,6 +13,9 @@
 #include "loader/OBJLoader.h"
 #include "scene/Scene.h"
 #include "core/Timer.h"
+#include "core/InputManager.h"
+#include "test/RenderTest.h"
+#include <cstring>
 
 // ---------------------------------------------------------------------------
 // Resolve path relative to the executable location
@@ -97,6 +102,53 @@ static Mesh* createPlaneMesh(void* device, float size) {
 }
 
 // ---------------------------------------------------------------------------
+// Build a UV sphere mesh
+// ---------------------------------------------------------------------------
+static Mesh* createSphereMesh(void* device, float radius, int slices, int stacks) {
+    std::vector<Vertex> vertices;
+    std::vector<uint16_t> indices;
+
+    for (int j = 0; j <= stacks; j++) {
+        float phi = M_PI * (float)j / (float)stacks;
+        float y = radius * cosf(phi);
+        float r = radius * sinf(phi);
+
+        for (int i = 0; i <= slices; i++) {
+            float theta = 2.0f * M_PI * (float)i / (float)slices;
+            float x = r * cosf(theta);
+            float z = r * sinf(theta);
+
+            simd_float3 pos = {x, y, z};
+            simd_float3 norm = simd_normalize(pos);
+            simd_float2 uv = {(float)i / slices, (float)j / stacks};
+
+            Vertex v;
+            v.position = pos;
+            v.normal = norm;
+            v.texCoord = uv;
+            v.color = (simd_float4){1, 1, 1, 1};
+            vertices.push_back(v);
+        }
+    }
+
+    for (int j = 0; j < stacks; j++) {
+        for (int i = 0; i < slices; i++) {
+            uint16_t a = j * (slices + 1) + i;
+            uint16_t b = a + (slices + 1);
+            indices.push_back(a);
+            indices.push_back(b);
+            indices.push_back(a + 1);
+            indices.push_back(a + 1);
+            indices.push_back(b);
+            indices.push_back(b + 1);
+        }
+    }
+
+    return new Mesh(device, vertices.data(), vertices.size() * sizeof(Vertex),
+                    indices.data(), indices.size());
+}
+
+// ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
 int main(int argc, const char* argv[]) {
@@ -123,8 +175,9 @@ int main(int argc, const char* argv[]) {
         void* device = renderer.getDevice();
 
         // Create meshes
-        Mesh* cubeMesh  = createCubeMesh(device);
-        Mesh* planeMesh = createPlaneMesh(device, 10.0f);
+        Mesh* cubeMesh   = createCubeMesh(device);
+        Mesh* planeMesh  = createPlaneMesh(device, 10.0f);
+        Mesh* sphereMesh = createSphereMesh(device, 0.1f, 16, 12);
 
         // Load OBJ model (the cube.obj from assets)
         std::string objPath = resolvePath("assets/cube.obj");
@@ -190,6 +243,26 @@ int main(int argc, const char* argv[]) {
             scene.addObject(obj);
         }
 
+        // Light indicator sphere (emissive — bright white, ignores lighting)
+        {
+            SceneObject obj;
+            obj.mesh = sphereMesh;
+            obj.position = scene.lightPosition;
+            // Use high ambient so it appears self-lit
+            obj.material.ambient  = {5.0f, 5.0f, 4.0f};
+            obj.material.diffuse  = {0.0f, 0.0f, 0.0f};
+            obj.material.specular = {0.0f, 0.0f, 0.0f};
+            obj.material.shininess = 1.0f;
+            scene.addObject(obj);
+        }
+
+        // --test mode: run automated pixel tests and exit
+        if (argc > 1 && strcmp(argv[1], "--test") == 0) {
+            printf("[KisekiEngine] Running automated render tests...\n");
+            int result = RenderTest::runAll(renderer, scene);
+            return result;
+        }
+
         Timer timer;
         int   frameCount = 0;
         float fpsTimer   = 0.0f;
@@ -211,6 +284,12 @@ int main(int argc, const char* argv[]) {
                 renderer.handleResize();
             }
 
+            // Debug mode: press 0-9 to switch visualization
+            int numKey = InputManager::consumeNumberKeyPress();
+            if (numKey >= 0) {
+                renderer.setDebugMode(numKey);
+            }
+
             // Animate the center cube
             scene.objects[0].rotation.y = elapsed;
 
@@ -229,6 +308,7 @@ int main(int argc, const char* argv[]) {
         // Cleanup
         delete cubeMesh;
         delete planeMesh;
+        delete sphereMesh;
         delete objMesh;
         delete groundTexture;
 

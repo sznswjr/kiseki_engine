@@ -18,6 +18,7 @@ set(SOURCES
     src/scene/Camera.mm
     src/scene/SceneObject.mm
     src/loader/OBJLoader.mm
+    src/test/RenderTest.mm
 )
 
 add_executable(KisekiEngine ${SOURCES})

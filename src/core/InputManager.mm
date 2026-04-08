@@ -27,3 +27,15 @@ void InputManager::consumeMouseDelta(float& dx, float& dy) {
     s_mouseDX = 0.0f;
     s_mouseDY = 0.0f;
 }
+
+int InputManager::consumeNumberKeyPress() {
+    static const uint16_t numKeys[] = {KEY_0, KEY_1, KEY_2, KEY_3, KEY_4,
+                                        KEY_5, KEY_6, KEY_7, KEY_8, KEY_9};
+    for (int i = 0; i < 10; i++) {
+        if (s_keys[numKeys[i]]) {
+            s_keys[numKeys[i]] = false; // consume
+            return i;
+        }
+    }
+    return -1;
+}

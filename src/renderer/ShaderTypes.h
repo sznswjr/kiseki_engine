@@ -16,13 +16,13 @@ struct Uniforms {
     simd_float4x4 modelMatrix;
     simd_float4x4 viewMatrix;
     simd_float4x4 projectionMatrix;
-    simd_float4   normalMatrixCol0;  // columns of normalMatrix stored as float4
+    simd_float4   normalMatrixCol0;
     simd_float4   normalMatrixCol1;
     simd_float4   normalMatrixCol2;
 };
 
 struct Light {
-    simd_float4 direction;       // xyz = direction, w = unused
+    simd_float4 position;        // xyz = world position, w = unused
     simd_float4 colorAndAmbient; // xyz = color, w = ambientIntensity
 };
 

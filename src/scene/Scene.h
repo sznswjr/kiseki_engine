@@ -5,15 +5,13 @@
 #include "scene/SceneObject.h"
 #include "scene/Camera.h"
 
-struct Light;
-
 struct Scene {
     std::vector<SceneObject> objects;
     Camera camera;
 
-    // Directional light
-    simd_float3 lightDirection = simd_normalize((simd_float3){0.5f, 1.0f, 0.8f});
-    simd_float3 lightColor     = {1.0f, 1.0f, 1.0f};
+    // Point light
+    simd_float3 lightPosition   = {1.5f, 3.0f, 1.5f};  // above and to the side of center cube
+    simd_float3 lightColor      = {1.0f, 1.0f, 1.0f};
     float       ambientIntensity = 0.15f;
 
     void addObject(const SceneObject& obj) {
