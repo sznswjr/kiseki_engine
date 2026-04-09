@@ -14,9 +14,27 @@ struct FaceVertex {
     }
 };
 
+static void parseFaceVertex(const std::string& vertStr, FaceVertex& fv) {
+    fv = {0, 0, 0};
+    int slashCount = 0;
+    for (char c : vertStr) if (c == '/') slashCount++;
+
+    if (slashCount == 0) {
+        sscanf(vertStr.c_str(), "%d", &fv.vi);
+    } else if (slashCount == 1) {
+        sscanf(vertStr.c_str(), "%d/%d", &fv.vi, &fv.ti);
+    } else if (slashCount == 2) {
+        if (vertStr.find("//") != std::string::npos) {
+            sscanf(vertStr.c_str(), "%d//%d", &fv.vi, &fv.ni);
+        } else {
+            sscanf(vertStr.c_str(), "%d/%d/%d", &fv.vi, &fv.ti, &fv.ni);
+        }
+    }
+}
+
 bool OBJLoader::loadRaw(const char* path,
                          std::vector<Vertex>& outVertices,
-                         std::vector<uint16_t>& outIndices) {
+                         std::vector<uint32_t>& outIndices) {
     std::ifstream file(path);
     if (!file.is_open()) {
         fprintf(stderr, "[OBJLoader] Failed to open: %s\n", path);
@@ -26,7 +44,7 @@ bool OBJLoader::loadRaw(const char* path,
     std::vector<simd_float3> positions;
     std::vector<simd_float3> normals;
     std::vector<simd_float2> texCoords;
-    std::map<FaceVertex, uint16_t> vertexMap;
+    std::map<FaceVertex, uint32_t> vertexMap;
 
     std::string line;
     while (std::getline(file, line)) {
@@ -49,26 +67,11 @@ bool OBJLoader::loadRaw(const char* path,
             iss >> u >> v;
             texCoords.push_back((simd_float2){u, v});
         } else if (token == "f") {
-            // Parse face vertices (triangulate if >3 vertices = quad)
             std::vector<FaceVertex> faceVerts;
             std::string vertStr;
             while (iss >> vertStr) {
-                FaceVertex fv = {0, 0, 0};
-                // Parse v, v/vt, v/vt/vn, v//vn formats
-                int slashCount = 0;
-                for (char c : vertStr) if (c == '/') slashCount++;
-
-                if (slashCount == 0) {
-                    sscanf(vertStr.c_str(), "%d", &fv.vi);
-                } else if (slashCount == 1) {
-                    sscanf(vertStr.c_str(), "%d/%d", &fv.vi, &fv.ti);
-                } else if (slashCount == 2) {
-                    if (vertStr.find("//") != std::string::npos) {
-                        sscanf(vertStr.c_str(), "%d//%d", &fv.vi, &fv.ni);
-                    } else {
-                        sscanf(vertStr.c_str(), "%d/%d/%d", &fv.vi, &fv.ti, &fv.ni);
-                    }
-                }
+                FaceVertex fv;
+                parseFaceVertex(vertStr, fv);
                 faceVerts.push_back(fv);
             }
 
@@ -87,9 +90,9 @@ bool OBJLoader::loadRaw(const char* path,
                             v.normal = normals[tri[j].ni - 1];
                         if (tri[j].ti > 0 && tri[j].ti <= (int)texCoords.size())
                             v.texCoord = texCoords[tri[j].ti - 1];
-                        v.color = (simd_float4){0.8f, 0.8f, 0.8f, 1.0f}; // default gray
+                        v.color = (simd_float4){0.8f, 0.8f, 0.8f, 1.0f};
 
-                        uint16_t idx = (uint16_t)outVertices.size();
+                        uint32_t idx = (uint32_t)outVertices.size();
                         vertexMap[tri[j]] = idx;
                         outVertices.push_back(v);
                         outIndices.push_back(idx);
@@ -104,9 +107,115 @@ bool OBJLoader::loadRaw(const char* path,
     return !outVertices.empty();
 }
 
+std::vector<OBJMeshData> OBJLoader::loadMulti(const char* path) {
+    std::ifstream file(path);
+    if (!file.is_open()) {
+        fprintf(stderr, "[OBJLoader] Failed to open: %s\n", path);
+        return {};
+    }
+
+    std::vector<simd_float3> positions;
+    std::vector<simd_float3> normals;
+    std::vector<simd_float2> texCoords;
+
+    std::vector<OBJMeshData> meshes;
+    OBJMeshData* current = nullptr;
+    std::map<FaceVertex, uint32_t> vertexMap;
+    std::string mtlLibName;
+
+    auto ensureCurrentMesh = [&]() {
+        if (!current) {
+            meshes.push_back({});
+            current = &meshes.back();
+            current->materialName = "default";
+            vertexMap.clear();
+        }
+    };
+
+    std::string line;
+    while (std::getline(file, line)) {
+        if (line.empty() || line[0] == '#') continue;
+
+        std::istringstream iss(line);
+        std::string token;
+        iss >> token;
+
+        if (token == "mtllib") {
+            iss >> mtlLibName;
+        } else if (token == "usemtl") {
+            std::string matName;
+            iss >> matName;
+            // Start a new mesh group for this material
+            meshes.push_back({});
+            current = &meshes.back();
+            current->materialName = matName;
+            vertexMap.clear();
+        } else if (token == "v") {
+            float x, y, z;
+            iss >> x >> y >> z;
+            positions.push_back((simd_float3){x, y, z});
+        } else if (token == "vn") {
+            float x, y, z;
+            iss >> x >> y >> z;
+            normals.push_back((simd_float3){x, y, z});
+        } else if (token == "vt") {
+            float u, v;
+            iss >> u >> v;
+            texCoords.push_back((simd_float2){u, v});
+        } else if (token == "f") {
+            ensureCurrentMesh();
+            std::vector<FaceVertex> faceVerts;
+            std::string vertStr;
+            while (iss >> vertStr) {
+                FaceVertex fv;
+                parseFaceVertex(vertStr, fv);
+                faceVerts.push_back(fv);
+            }
+
+            for (size_t i = 1; i + 1 < faceVerts.size(); i++) {
+                FaceVertex tri[3] = { faceVerts[0], faceVerts[i], faceVerts[i+1] };
+                for (int j = 0; j < 3; j++) {
+                    auto it = vertexMap.find(tri[j]);
+                    if (it != vertexMap.end()) {
+                        current->indices.push_back(it->second);
+                    } else {
+                        Vertex v = {};
+                        if (tri[j].vi > 0 && tri[j].vi <= (int)positions.size())
+                            v.position = positions[tri[j].vi - 1];
+                        if (tri[j].ni > 0 && tri[j].ni <= (int)normals.size())
+                            v.normal = normals[tri[j].ni - 1];
+                        if (tri[j].ti > 0 && tri[j].ti <= (int)texCoords.size())
+                            v.texCoord = texCoords[tri[j].ti - 1];
+                        v.color = (simd_float4){0.8f, 0.8f, 0.8f, 1.0f};
+
+                        uint32_t idx = (uint32_t)current->vertices.size();
+                        vertexMap[tri[j]] = idx;
+                        current->vertices.push_back(v);
+                        current->indices.push_back(idx);
+                    }
+                }
+            }
+        }
+    }
+
+    // Remove empty mesh groups
+    meshes.erase(
+        std::remove_if(meshes.begin(), meshes.end(),
+                       [](const OBJMeshData& m) { return m.vertices.empty(); }),
+        meshes.end());
+
+    printf("[OBJLoader] Loaded %s: %zu mesh groups\n", path, meshes.size());
+    for (size_t i = 0; i < meshes.size(); i++) {
+        printf("  Group %zu [%s]: %zu verts, %zu indices\n",
+               i, meshes[i].materialName.c_str(),
+               meshes[i].vertices.size(), meshes[i].indices.size());
+    }
+    return meshes;
+}
+
 Mesh* OBJLoader::load(const char* path, void* device) {
     std::vector<Vertex> vertices;
-    std::vector<uint16_t> indices;
+    std::vector<uint32_t> indices;
 
     if (!loadRaw(path, vertices, indices)) {
         return nullptr;
@@ -114,5 +223,5 @@ Mesh* OBJLoader::load(const char* path, void* device) {
 
     return new Mesh(device,
                     vertices.data(), vertices.size() * sizeof(Vertex),
-                    indices.data(), indices.size());
+                    indices.data(), indices.size(), true);
 }

@@ -3,8 +3,8 @@
 #include <cstdio>
 
 Mesh::Mesh(void* device, const void* vertices, size_t vertexDataSize,
-           const void* indices, size_t indexCount)
-    : m_indexCount(indexCount)
+           const void* indices, size_t indexCount, bool use32BitIndices)
+    : m_indexCount(indexCount), m_use32BitIndices(use32BitIndices)
 {
     id<MTLDevice> dev = (__bridge id<MTLDevice>)device;
 
@@ -17,7 +17,7 @@ Mesh::Mesh(void* device, const void* vertices, size_t vertexDataSize,
     }
     m_vertexBuffer = (__bridge_retained void*)vb;
 
-    size_t indexDataSize = indexCount * sizeof(uint16_t);
+    size_t indexDataSize = indexCount * (use32BitIndices ? sizeof(uint32_t) : sizeof(uint16_t));
     id<MTLBuffer> ib = [dev newBufferWithBytes:indices
                                          length:indexDataSize
                                         options:MTLResourceStorageModeShared];
@@ -45,7 +45,7 @@ void Mesh::draw(void* encoder) const {
     [enc setVertexBuffer:vb offset:0 atIndex:0];
     [enc drawIndexedPrimitives:MTLPrimitiveTypeTriangle
                     indexCount:m_indexCount
-                     indexType:MTLIndexTypeUInt16
+                     indexType:m_use32BitIndices ? MTLIndexTypeUInt32 : MTLIndexTypeUInt16
                    indexBuffer:ib
              indexBufferOffset:0];
 }

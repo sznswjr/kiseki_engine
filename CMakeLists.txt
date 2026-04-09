@@ -18,6 +18,8 @@ set(SOURCES
     src/scene/Camera.mm
     src/scene/SceneObject.mm
     src/loader/OBJLoader.mm
+    src/loader/MTLLoader.mm
+    src/loader/ProceduralMesh.mm
     src/test/RenderTest.mm
 )
 
