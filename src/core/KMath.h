@@ -104,6 +104,27 @@ inline simd_float4x4 perspective(float fovYRadians, float aspect, float nearZ, f
 }
 
 // ---------------------------------------------------------------------------
+// Orthographic projection (right-handed, Metal NDC z in [0,1])
+// ---------------------------------------------------------------------------
+inline simd_float4x4 orthographic(float left, float right,
+                                  float bottom, float top,
+                                  float nearZ, float farZ) {
+    float sx = 2.0f / (right - left);
+    float sy = 2.0f / (top - bottom);
+    float sz = 1.0f / (nearZ - farZ);
+    float tx = -(right + left) / (right - left);
+    float ty = -(top + bottom) / (top - bottom);
+    float tz = nearZ / (nearZ - farZ);
+
+    return (simd_float4x4){{
+        {sx, 0,  0,  0},
+        {0,  sy, 0,  0},
+        {0,  0,  sz, 0},
+        {tx, ty, tz, 1}
+    }};
+}
+
+// ---------------------------------------------------------------------------
 // Look-at (right-handed)
 // ---------------------------------------------------------------------------
 inline simd_float4x4 lookAt(simd_float3 eye, simd_float3 target, simd_float3 up) {

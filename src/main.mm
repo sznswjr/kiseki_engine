@@ -199,8 +199,12 @@ int main(int argc, const char* argv[]) {
         // =====================================================================
         Scene scene;
         scene.camera.setPosition((simd_float3){0, 3.0f, 10.0f});
-        scene.lightPosition = {3.0f, 8.0f, 4.0f};
-        scene.ambientIntensity = 0.2f;
+        scene.light.type = LightType::Point;
+        scene.light.position = {3.0f, 8.0f, 4.0f};
+        scene.light.color = {1.0f, 1.0f, 1.0f};
+        scene.light.intensity = 1.0f;
+        scene.light.range = 30.0f;
+        scene.light.ambientIntensity = 0.2f;
 
         // --- Ground (grass) ---
         {
@@ -216,6 +220,7 @@ int main(int argc, const char* argv[]) {
             } else if (groundTexture->isValid()) {
                 obj.material.diffuseTexture = groundTexture;
             }
+            obj.castsShadow = false;
             scene.addObject(obj);
         }
 
@@ -280,11 +285,14 @@ int main(int argc, const char* argv[]) {
         {
             SceneObject obj;
             obj.mesh = sphereMesh;
-            obj.position = scene.lightPosition;
+            obj.position = scene.light.position;
             obj.material.ambient  = {5.0f, 5.0f, 4.0f};
             obj.material.diffuse  = {0.0f, 0.0f, 0.0f};
             obj.material.specular = {0.0f, 0.0f, 0.0f};
             obj.material.shininess = 1.0f;
+            obj.castsShadow = false;
+            obj.receivesShadow = false;
+            obj.visibleInShadowPass = false;
             scene.addObject(obj);
         }
 

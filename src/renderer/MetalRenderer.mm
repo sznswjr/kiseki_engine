@@ -40,6 +40,20 @@ static id<MTLLibrary> loadShaderLibrary(id<MTLDevice> device, const char* path) 
     return library;
 }
 
+static simd_float4x4 cubeFaceViewMatrix(simd_float3 lightPos, int face) {
+    static const simd_float3 directions[6] = {
+        { 1,  0,  0}, {-1,  0,  0},
+        { 0,  1,  0}, { 0, -1,  0},
+        { 0,  0,  1}, { 0,  0, -1},
+    };
+    static const simd_float3 ups[6] = {
+        { 0, -1,  0}, { 0, -1,  0},
+        { 0,  0,  1}, { 0,  0, -1},
+        { 0, -1,  0}, { 0, -1,  0},
+    };
+    return kmath::lookAt(lightPos, lightPos + directions[face], ups[face]);
+}
+
 // ---------------------------------------------------------------------------
 // MetalRenderer
 // ---------------------------------------------------------------------------
@@ -102,6 +116,19 @@ MetalRenderer::MetalRenderer(void* metalLayer, const char* shaderPath)
     id<MTLSamplerState> sampler = [device newSamplerStateWithDescriptor:samplerDesc];
     m_samplerState = (__bridge_retained void*)sampler;
 
+    // Shadow sampler
+    MTLSamplerDescriptor* shadowSamplerDesc = [[MTLSamplerDescriptor alloc] init];
+    shadowSamplerDesc.minFilter = MTLSamplerMinMagFilterLinear;
+    shadowSamplerDesc.magFilter = MTLSamplerMinMagFilterLinear;
+    shadowSamplerDesc.sAddressMode = MTLSamplerAddressModeClampToEdge;
+    shadowSamplerDesc.tAddressMode = MTLSamplerAddressModeClampToEdge;
+    id<MTLSamplerState> shadowSampler = [device newSamplerStateWithDescriptor:shadowSamplerDesc];
+    m_shadowSamplerState = (__bridge_retained void*)shadowSampler;
+
+    // Shadow map and pipeline
+    createShadowMap();
+    createShadowPipeline();
+
     // Frame semaphore for triple buffering
     m_frameSemaphore = (__bridge_retained void*)dispatch_semaphore_create(kMaxFramesInFlight);
 
@@ -125,6 +152,14 @@ MetalRenderer::~MetalRenderer() {
     m_depthTexture      = nullptr;
     m_samplerState      = nullptr;
     m_shaderLibrary     = nullptr;
+    if (m_shadowMap)           CFRelease(m_shadowMap);
+    if (m_shadowDepthTexture)  CFRelease(m_shadowDepthTexture);
+    if (m_shadowPipelineState) CFRelease(m_shadowPipelineState);
+    if (m_shadowSamplerState)  CFRelease(m_shadowSamplerState);
+    m_shadowMap           = nullptr;
+    m_shadowDepthTexture  = nullptr;
+    m_shadowPipelineState = nullptr;
+    m_shadowSamplerState  = nullptr;
 }
 
 void MetalRenderer::createDepthTexture() {
@@ -154,18 +189,188 @@ void MetalRenderer::handleResize() {
 }
 
 // ---------------------------------------------------------------------------
+// createShadowMap — 6-slice array storing normalized point-light depth.
+// ---------------------------------------------------------------------------
+void MetalRenderer::createShadowMap() {
+    id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+
+    MTLTextureDescriptor* desc = [MTLTextureDescriptor
+        texture2DDescriptorWithPixelFormat:MTLPixelFormatR32Float
+                                     width:kShadowMapSize
+                                    height:kShadowMapSize
+                                 mipmapped:NO];
+    desc.textureType = MTLTextureType2DArray;
+    desc.arrayLength = 6;
+    desc.storageMode = MTLStorageModePrivate;
+    desc.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+
+    id<MTLTexture> shadowTex = [device newTextureWithDescriptor:desc];
+    if (m_shadowMap) {
+        CFRelease(m_shadowMap);
+    }
+    m_shadowMap = (__bridge_retained void*)shadowTex;
+
+    MTLTextureDescriptor* depthDesc = [MTLTextureDescriptor
+        texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float
+                                     width:kShadowMapSize
+                                    height:kShadowMapSize
+                                 mipmapped:NO];
+    depthDesc.storageMode = MTLStorageModePrivate;
+    depthDesc.usage = MTLTextureUsageRenderTarget;
+
+    id<MTLTexture> depthTex = [device newTextureWithDescriptor:depthDesc];
+    if (m_shadowDepthTexture) {
+        CFRelease(m_shadowDepthTexture);
+    }
+    m_shadowDepthTexture = (__bridge_retained void*)depthTex;
+
+    printf("[KisekiEngine] Point shadow map array created (%dx%d x 6)\n",
+           kShadowMapSize, kShadowMapSize);
+}
+
+// ---------------------------------------------------------------------------
+// createShadowPipeline — point-light cubemap shadow pipeline
+// ---------------------------------------------------------------------------
+void MetalRenderer::createShadowPipeline() {
+    id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+    id<MTLLibrary> library = (__bridge id<MTLLibrary>)m_shaderLibrary;
+
+    id<MTLFunction> shadowVertexFunc = [library newFunctionWithName:@"shadow_vertex"];
+    if (!shadowVertexFunc) {
+        fprintf(stderr, "[KisekiEngine] Failed to find shadow_vertex function\n");
+        return;
+    }
+    id<MTLFunction> shadowFragmentFunc = [library newFunctionWithName:@"point_shadow_fragment"];
+    if (!shadowFragmentFunc) {
+        fprintf(stderr, "[KisekiEngine] Failed to find point_shadow_fragment function\n");
+        return;
+    }
+
+    // Same vertex descriptor as main pipeline
+    MTLVertexDescriptor* vertexDesc = [[MTLVertexDescriptor alloc] init];
+    vertexDesc.attributes[0].format = MTLVertexFormatFloat3;
+    vertexDesc.attributes[0].offset = offsetof(Vertex, position);
+    vertexDesc.attributes[0].bufferIndex = 0;
+    vertexDesc.attributes[1].format = MTLVertexFormatFloat3;
+    vertexDesc.attributes[1].offset = offsetof(Vertex, normal);
+    vertexDesc.attributes[1].bufferIndex = 0;
+    vertexDesc.attributes[2].format = MTLVertexFormatFloat2;
+    vertexDesc.attributes[2].offset = offsetof(Vertex, texCoord);
+    vertexDesc.attributes[2].bufferIndex = 0;
+    vertexDesc.attributes[3].format = MTLVertexFormatFloat4;
+    vertexDesc.attributes[3].offset = offsetof(Vertex, color);
+    vertexDesc.attributes[3].bufferIndex = 0;
+    vertexDesc.layouts[0].stride = sizeof(Vertex);
+    vertexDesc.layouts[0].stepFunction = MTLVertexStepFunctionPerVertex;
+
+    MTLRenderPipelineDescriptor* pipelineDesc = [[MTLRenderPipelineDescriptor alloc] init];
+    pipelineDesc.vertexFunction = shadowVertexFunc;
+    pipelineDesc.fragmentFunction = shadowFragmentFunc;
+    pipelineDesc.vertexDescriptor = vertexDesc;
+    pipelineDesc.colorAttachments[0].pixelFormat = MTLPixelFormatR32Float;
+    pipelineDesc.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
+
+    NSError* error = nil;
+    id<MTLRenderPipelineState> pipelineState = [device newRenderPipelineStateWithDescriptor:pipelineDesc error:&error];
+    if (!pipelineState) {
+        fprintf(stderr, "[KisekiEngine] Failed to create shadow pipeline: %s\n",
+                [[error localizedDescription] UTF8String]);
+        return;
+    }
+
+    if (m_shadowPipelineState) {
+        CFRelease(m_shadowPipelineState);
+    }
+    m_shadowPipelineState = (__bridge_retained void*)pipelineState;
+    printf("[KisekiEngine] Shadow pipeline created\n");
+}
+
+// ---------------------------------------------------------------------------
+// encodePointShadowPass — render six normalized distance faces from point light.
+// ---------------------------------------------------------------------------
+void MetalRenderer::encodePointShadowPass(void* cmdBufferPtr, Scene& scene) {
+    if (!scene.light.castsShadow || scene.light.type != LightType::Point) return;
+
+    id<MTLCommandBuffer> cmdBuffer = (__bridge id<MTLCommandBuffer>)cmdBufferPtr;
+    id<MTLTexture> shadowCube = (__bridge id<MTLTexture>)m_shadowMap;
+    id<MTLTexture> shadowDepth = (__bridge id<MTLTexture>)m_shadowDepthTexture;
+    id<MTLRenderPipelineState> shadowPipeline = (__bridge id<MTLRenderPipelineState>)m_shadowPipelineState;
+    id<MTLDepthStencilState> depthState = (__bridge id<MTLDepthStencilState>)m_depthStencilState;
+
+    simd_float3 lightPos = scene.light.position;
+    simd_float4x4 lightProj = kmath::perspective(kmath::radians(90.0f), 1.0f,
+                                                 0.05f, scene.light.range);
+    ShadowUniforms shadowUniforms;
+    memset(&shadowUniforms, 0, sizeof(ShadowUniforms));
+    shadowUniforms.lightPositionAndRange = (simd_float4){
+        lightPos.x, lightPos.y, lightPos.z, scene.light.range
+    };
+    shadowUniforms.shadowType = (int)scene.light.type;
+    shadowUniforms.shadowEnabled = 1;
+
+    for (int face = 0; face < 6; face++) {
+        id<MTLTexture> faceTex = [shadowCube newTextureViewWithPixelFormat:MTLPixelFormatR32Float
+                                                               textureType:MTLTextureType2D
+                                                                    levels:NSMakeRange(0, 1)
+                                                                    slices:NSMakeRange(face, 1)];
+        MTLRenderPassDescriptor* passDesc = [MTLRenderPassDescriptor renderPassDescriptor];
+        passDesc.colorAttachments[0].texture = faceTex;
+        passDesc.colorAttachments[0].loadAction = MTLLoadActionClear;
+        passDesc.colorAttachments[0].storeAction = MTLStoreActionStore;
+        passDesc.colorAttachments[0].clearColor = MTLClearColorMake(1.0, 1.0, 1.0, 1.0);
+        passDesc.depthAttachment.texture = shadowDepth;
+        passDesc.depthAttachment.loadAction = MTLLoadActionClear;
+        passDesc.depthAttachment.storeAction = MTLStoreActionDontCare;
+        passDesc.depthAttachment.clearDepth = 1.0;
+
+        id<MTLRenderCommandEncoder> encoder = [cmdBuffer renderCommandEncoderWithDescriptor:passDesc];
+        if (!encoder) continue;
+
+        [encoder setRenderPipelineState:shadowPipeline];
+        [encoder setDepthStencilState:depthState];
+        [encoder setFrontFacingWinding:MTLWindingCounterClockwise];
+        [encoder setCullMode:MTLCullModeFront];
+        [encoder setFragmentBytes:&shadowUniforms length:sizeof(ShadowUniforms) atIndex:0];
+
+        MTLViewport viewport = {0, 0, (double)kShadowMapSize, (double)kShadowMapSize, 0, 1};
+        [encoder setViewport:viewport];
+        [encoder setDepthBias:0.003 slopeScale:1.5 clamp:0.02];
+
+        simd_float4x4 lightView = cubeFaceViewMatrix(lightPos, face);
+        for (auto& obj : scene.objects) {
+            if (!obj.mesh || !obj.castsShadow || !obj.visibleInShadowPass) continue;
+
+            Uniforms uniforms;
+            uniforms.modelMatrix = obj.getModelMatrix();
+            uniforms.viewMatrix = lightView;
+            uniforms.projectionMatrix = lightProj;
+            uniforms.normalMatrixCol0 = (simd_float4){0, 0, 0, 0};
+            uniforms.normalMatrixCol1 = (simd_float4){0, 0, 0, 0};
+            uniforms.normalMatrixCol2 = (simd_float4){0, 0, 0, 0};
+
+            [encoder setVertexBytes:&uniforms length:sizeof(Uniforms) atIndex:1];
+            obj.mesh->draw((__bridge void*)encoder);
+        }
+        [encoder endEncoding];
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Shared scene encoding — used by both draw() and captureFrame()
 // ---------------------------------------------------------------------------
 void MetalRenderer::encodeScene(void* encoderPtr, void* ubPtr, void* fubPtr,
                                  Scene& scene, float dt, float time,
-                                 int viewWidth, int viewHeight) {
+                                 int viewWidth, int viewHeight,
+                                 void* shadowMapTex) {
+    (void)ubPtr;
+    (void)fubPtr;
     id<MTLRenderCommandEncoder> encoder = (__bridge id<MTLRenderCommandEncoder>)encoderPtr;
-    id<MTLBuffer> ub  = (__bridge id<MTLBuffer>)ubPtr;
-    id<MTLBuffer> fub = (__bridge id<MTLBuffer>)fubPtr;
 
     id<MTLRenderPipelineState> pipeline = (__bridge id<MTLRenderPipelineState>)m_pipelineState;
     id<MTLDepthStencilState> depthState = (__bridge id<MTLDepthStencilState>)m_depthStencilState;
     id<MTLSamplerState> sampler = (__bridge id<MTLSamplerState>)m_samplerState;
+    id<MTLSamplerState> shadowSampler = (__bridge id<MTLSamplerState>)m_shadowSamplerState;
+    id<MTLTexture> shadowTex = (__bridge id<MTLTexture>)shadowMapTex;
 
     float aspect = (float)viewWidth / (float)viewHeight;
     simd_float4x4 viewMatrix = scene.camera.getViewMatrix();
@@ -177,14 +382,24 @@ void MetalRenderer::encodeScene(void* encoderPtr, void* ubPtr, void* fubPtr,
     [encoder setCullMode:MTLCullModeBack];
     [encoder setFragmentSamplerState:sampler atIndex:0];
 
+    // Bind shadow resources (per-frame, set once before object loop)
+    ShadowUniforms shadowUniforms;
+    memset(&shadowUniforms, 0, sizeof(ShadowUniforms));
+    shadowUniforms.lightPositionAndRange = (simd_float4){
+        scene.light.position.x, scene.light.position.y, scene.light.position.z, scene.light.range
+    };
+    shadowUniforms.shadowType = (int)scene.light.type;
+    shadowUniforms.shadowEnabled = scene.light.castsShadow ? 1 : 0;
+    [encoder setFragmentBytes:&shadowUniforms length:sizeof(ShadowUniforms) atIndex:1];
+    [encoder setFragmentTexture:shadowTex atIndex:1];
+    [encoder setFragmentSamplerState:shadowSampler atIndex:1];
+
     // Set viewport explicitly (critical for offscreen rendering)
     MTLViewport viewport = {0, 0, (double)viewWidth, (double)viewHeight, 0, 1};
     [encoder setViewport:viewport];
-    printf("[encodeScene] viewport: %dx%d\n", viewWidth, viewHeight);
 
-    int drawCount = 0;
     for (auto& obj : scene.objects) {
-        if (!obj.mesh) continue;
+        if (!obj.mesh || !obj.visibleInMainPass) continue;
 
         simd_float4x4 modelMatrix = obj.getModelMatrix();
 
@@ -202,10 +417,13 @@ void MetalRenderer::encodeScene(void* encoderPtr, void* ubPtr, void* fubPtr,
         FragmentUniforms fragUniforms;
         memset(&fragUniforms, 0, sizeof(FragmentUniforms));
 
-        fragUniforms.light.position = (simd_float4){
-            scene.lightPosition.x, scene.lightPosition.y, scene.lightPosition.z, 0};
+        fragUniforms.light.positionAndRange = (simd_float4){
+            scene.light.position.x, scene.light.position.y, scene.light.position.z, scene.light.range};
         fragUniforms.light.colorAndAmbient = (simd_float4){
-            scene.lightColor.x, scene.lightColor.y, scene.lightColor.z, scene.ambientIntensity};
+            scene.light.color.x * scene.light.intensity,
+            scene.light.color.y * scene.light.intensity,
+            scene.light.color.z * scene.light.intensity,
+            scene.light.ambientIntensity};
 
         fragUniforms.material.ambient  = (simd_float4){
             obj.material.ambient.x, obj.material.ambient.y, obj.material.ambient.z, 0};
@@ -214,10 +432,7 @@ void MetalRenderer::encodeScene(void* encoderPtr, void* ubPtr, void* fubPtr,
         fragUniforms.material.specular = (simd_float4){
             obj.material.specular.x, obj.material.specular.y, obj.material.specular.z, obj.material.shininess};
         fragUniforms.material.hasTexture = obj.material.hasTexture() ? 1 : 0;
-
-        printf("[encodeScene] obj %d: hasTexture=%d, diffuseTexPtr=%p\n",
-               drawCount, fragUniforms.material.hasTexture,
-               (void*)obj.material.diffuseTexture);
+        fragUniforms.material.receivesShadow = obj.receivesShadow ? 1 : 0;
 
         simd_float3 camPos = scene.camera.getPosition();
         fragUniforms.cameraPosition = (simd_float4){camPos.x, camPos.y, camPos.z, 0};
@@ -232,20 +447,7 @@ void MetalRenderer::encodeScene(void* encoderPtr, void* ubPtr, void* fubPtr,
         }
 
         obj.mesh->draw((__bridge void*)encoder);
-        drawCount++;
     }
-    printf("[encodeScene] drew %d objects, aspect=%.2f\n", drawCount, aspect);
-    printf("[encodeScene] cam pos=(%.1f,%.1f,%.1f)\n",
-           scene.camera.getPosition().x, scene.camera.getPosition().y, scene.camera.getPosition().z);
-    // Transform world origin through VP to verify
-    simd_float4 origin = {0, 0, 0, 1};
-    simd_float4 viewSpace = simd_mul(viewMatrix, origin);
-    simd_float4 clipSpace = simd_mul(projMatrix, viewSpace);
-    simd_float3 ndc = {clipSpace.x/clipSpace.w, clipSpace.y/clipSpace.w, clipSpace.z/clipSpace.w};
-    printf("[encodeScene] origin in view=(%.2f,%.2f,%.2f,%.2f) clip=(%.2f,%.2f,%.2f,%.2f) ndc=(%.2f,%.2f,%.2f)\n",
-           viewSpace.x, viewSpace.y, viewSpace.z, viewSpace.w,
-           clipSpace.x, clipSpace.y, clipSpace.z, clipSpace.w,
-           ndc.x, ndc.y, ndc.z);
 }
 
 // ---------------------------------------------------------------------------
@@ -289,6 +491,9 @@ void MetalRenderer::draw(Scene& scene, float dt, float time) {
         id<MTLCommandBuffer> cmdBuffer = [queue commandBuffer];
         if (!cmdBuffer) { dispatch_semaphore_signal(sem); return; }
 
+        // Shadow pass (before main pass, same command buffer)
+        encodePointShadowPass((__bridge void*)cmdBuffer, scene);
+
         [cmdBuffer addCompletedHandler:^(id<MTLCommandBuffer> _Nonnull) {
             dispatch_semaphore_signal(sem);
         }];
@@ -299,7 +504,8 @@ void MetalRenderer::draw(Scene& scene, float dt, float time) {
         id<MTLBuffer> ub  = (__bridge id<MTLBuffer>)m_uniformBuffers[fi];
         id<MTLBuffer> fub = (__bridge id<MTLBuffer>)m_fragUniformBuffers[fi];
         encodeScene((__bridge void*)encoder, (__bridge void*)ub, (__bridge void*)fub,
-                    scene, dt, time, (int)drawableSize.width, (int)drawableSize.height);
+                    scene, dt, time, (int)drawableSize.width, (int)drawableSize.height,
+                    m_shadowMap);
 
         [encoder endEncoding];
         [cmdBuffer presentDrawable:drawable];
@@ -353,6 +559,9 @@ std::vector<PixelRGBA> MetalRenderer::captureFrame(Scene& scene, float dt, float
         id<MTLCommandBuffer> cmdBuffer = [queue commandBuffer];
         if (!cmdBuffer) return result;
 
+        // Shadow pass
+        encodePointShadowPass((__bridge void*)cmdBuffer, scene);
+
         id<MTLRenderCommandEncoder> encoder = [cmdBuffer renderCommandEncoderWithDescriptor:passDesc];
         if (!encoder) return result;
 
@@ -360,7 +569,8 @@ std::vector<PixelRGBA> MetalRenderer::captureFrame(Scene& scene, float dt, float
         id<MTLBuffer> ub  = (__bridge id<MTLBuffer>)m_uniformBuffers[0];
         id<MTLBuffer> fub = (__bridge id<MTLBuffer>)m_fragUniformBuffers[0];
         encodeScene((__bridge void*)encoder, (__bridge void*)ub, (__bridge void*)fub,
-                    scene, dt, time, width, height);
+                    scene, dt, time, width, height,
+                    m_shadowMap);
 
         [encoder endEncoding];
         [cmdBuffer commit];
@@ -373,34 +583,6 @@ std::vector<PixelRGBA> MetalRenderer::captureFrame(Scene& scene, float dt, float
                bytesPerRow:bytesPerRow
                 fromRegion:MTLRegionMake2D(0, 0, width, height)
                mipmapLevel:0];
-
-        // Diagnostic: find bounding box of non-clear pixels
-        int nonClearCount = 0;
-        int minX = width, maxX = 0, minY = height, maxY = 0;
-        for (int y = 0; y < height; y++) {
-            for (int x = 0; x < width; x++) {
-                int i = y * width + x;
-                uint8_t b = rawPixels[i*4+0], g = rawPixels[i*4+1], r = rawPixels[i*4+2];
-                if (r > 30 || g > 30 || b > 30) {
-                    nonClearCount++;
-                    if (x < minX) minX = x;
-                    if (x > maxX) maxX = x;
-                    if (y < minY) minY = y;
-                    if (y > maxY) maxY = y;
-                }
-            }
-        }
-        printf("[captureFrame] %dx%d, non-clear pixels: %d / %d\n",
-               width, height, nonClearCount, width * height);
-        if (nonClearCount > 0) {
-            printf("[captureFrame] bounding box: x=[%d..%d] y=[%d..%d]\n",
-                   minX, maxX, minY, maxY);
-            // Sample the center of the bounding box
-            int cx = (minX + maxX) / 2, cy = (minY + maxY) / 2;
-            int ci = cy * width + cx;
-            printf("[captureFrame] center pixel (%d,%d): BGRA=(%d,%d,%d,%d)\n",
-                   cx, cy, rawPixels[ci*4], rawPixels[ci*4+1], rawPixels[ci*4+2], rawPixels[ci*4+3]);
-        }
 
         // Convert BGRA → RGBA
         result.resize(width * height);

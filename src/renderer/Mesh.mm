@@ -1,4 +1,5 @@
 #import "Mesh.h"
+#import "ShaderTypes.h"
 #import <Metal/Metal.h>
 #include <cstdio>
 
@@ -7,6 +8,18 @@ Mesh::Mesh(void* device, const void* vertices, size_t vertexDataSize,
     : m_indexCount(indexCount), m_use32BitIndices(use32BitIndices)
 {
     id<MTLDevice> dev = (__bridge id<MTLDevice>)device;
+
+    size_t vertexCount = vertexDataSize / sizeof(Vertex);
+    const Vertex* vertexData = static_cast<const Vertex*>(vertices);
+    if (vertexCount > 0 && vertexData) {
+        m_minBounds = vertexData[0].position;
+        m_maxBounds = vertexData[0].position;
+        for (size_t i = 1; i < vertexCount; i++) {
+            simd_float3 p = vertexData[i].position;
+            m_minBounds = simd_min(m_minBounds, p);
+            m_maxBounds = simd_max(m_maxBounds, p);
+        }
+    }
 
     id<MTLBuffer> vb = [dev newBufferWithBytes:vertices
                                          length:vertexDataSize

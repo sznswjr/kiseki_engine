@@ -22,8 +22,8 @@ struct Uniforms {
 };
 
 struct Light {
-    simd_float4 position;        // xyz = world position, w = unused
-    simd_float4 colorAndAmbient; // xyz = color, w = ambientIntensity
+    simd_float4 positionAndRange; // xyz = world position, w = range
+    simd_float4 colorAndAmbient;  // xyz = color * intensity, w = ambientIntensity
 };
 
 struct MaterialUniforms {
@@ -31,11 +31,19 @@ struct MaterialUniforms {
     simd_float4 diffuse;         // xyz = diffuse, w = unused
     simd_float4 specular;        // xyz = specular, w = shininess
     int         hasTexture;
-    int         _pad[3];
+    int         receivesShadow;
+    int         _pad[2];
 };
 
 struct FragmentUniforms {
     Light            light;
     MaterialUniforms material;
     simd_float4      cameraPosition; // xyz = position, w = unused
+};
+
+struct ShadowUniforms {
+    simd_float4 lightPositionAndRange;
+    int         shadowType;
+    int         shadowEnabled;
+    int         _pad[2];
 };

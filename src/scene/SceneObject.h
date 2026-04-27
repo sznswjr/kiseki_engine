@@ -13,6 +13,10 @@ struct SceneObject {
     simd_float3 position = {0, 0, 0};
     simd_float3 rotation = {0, 0, 0};  // Euler angles (radians)
     simd_float3 scaleVec = {1, 1, 1};
+    bool castsShadow = true;
+    bool receivesShadow = true;
+    bool visibleInMainPass = true;
+    bool visibleInShadowPass = true;
 
     simd_float4x4 getModelMatrix() const;
 };

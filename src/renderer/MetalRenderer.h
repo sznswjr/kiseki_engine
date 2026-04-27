@@ -2,6 +2,7 @@
 
 #include <vector>
 #include <cstdint>
+#include <simd/simd.h>
 
 struct Scene;
 
@@ -23,7 +24,8 @@ public:
     void handleResize();
 
     // Debug mode: 0=normal, 1=normals, 2=NdotL, 3=attenuation,
-    // 4=hasTexture, 5=UV, 6=texture, 7=vertexColor, 8=diffuse, 9=ambient
+    // 4=hasTexture, 5=UV, 6=texture, 7=vertexColor, 8=diffuse, 9=ambient,
+    // 10=shadowMap
     void setDebugMode(int mode);
     int  getDebugMode() const { return m_debugMode; }
 
@@ -38,11 +40,17 @@ public:
 
 private:
     void createDepthTexture();
+    void createShadowMap();
+    void createShadowPipeline();
     bool createPipelineForDebugMode(int mode);
 
     // Shared render encoding used by both draw() and captureFrame()
     void encodeScene(void* encoder, void* ub, void* fub, Scene& scene,
-                     float dt, float time, int viewWidth, int viewHeight);
+                     float dt, float time, int viewWidth, int viewHeight,
+                     void* shadowMapTex);
+
+    // Encode six point-light cubemap shadow faces.
+    void encodePointShadowPass(void* cmdBuffer, Scene& scene);
 
     static constexpr int kMaxFramesInFlight = 3;
 
@@ -60,4 +68,11 @@ private:
     void*   m_frameSemaphore = nullptr;
     void*   m_shaderLibrary = nullptr;
     int     m_frameIndex = 0;
+
+    // Shadow mapping
+    void*   m_shadowMap = nullptr;
+    void*   m_shadowDepthTexture = nullptr;
+    void*   m_shadowPipelineState = nullptr;
+    void*   m_shadowSamplerState = nullptr;
+    static constexpr int kShadowMapSize = 2048;
 };

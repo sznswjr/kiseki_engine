@@ -26,8 +26,8 @@ struct Uniforms {
 };
 
 struct Light {
-    float4 position;        // xyz = world position
-    float4 colorAndAmbient; // xyz = color, w = ambientIntensity
+    float4 positionAndRange; // xyz = world position, w = range
+    float4 colorAndAmbient;  // xyz = color * intensity, w = ambientIntensity
 };
 
 struct MaterialUniforms {
@@ -35,7 +35,8 @@ struct MaterialUniforms {
     float4 diffuse;         // xyz
     float4 specular;        // xyz = specular, w = shininess
     int    hasTexture;
-    int    _pad[3];
+    int    receivesShadow;
+    int    _pad[2];
 };
 
 struct FragmentUniforms {
@@ -43,6 +44,37 @@ struct FragmentUniforms {
     MaterialUniforms material;
     float4           cameraPosition; // xyz
 };
+
+struct ShadowUniforms {
+    float4 lightPositionAndRange;
+    int    shadowType;
+    int    shadowEnabled;
+    int    _pad[2];
+};
+
+// ---------------------------------------------------------------------------
+// Shadow pass: depth-only vertex shader (no fragment shader needed)
+// ---------------------------------------------------------------------------
+struct ShadowVertexOut {
+    float4 position [[position]];
+    float3 worldPosition;
+};
+
+vertex ShadowVertexOut shadow_vertex(VertexIn in [[stage_in]],
+                                      constant Uniforms& uniforms [[buffer(1)]]) {
+    ShadowVertexOut out;
+    float4 worldPos = uniforms.modelMatrix * float4(in.position, 1.0);
+    out.position = uniforms.projectionMatrix * uniforms.viewMatrix * worldPos;
+    out.worldPosition = worldPos.xyz;
+    return out;
+}
+
+fragment float4 point_shadow_fragment(ShadowVertexOut in [[stage_in]],
+                                      constant ShadowUniforms& shadowUniforms [[buffer(0)]]) {
+    float distanceToLight = length(in.worldPosition - shadowUniforms.lightPositionAndRange.xyz);
+    float normalizedDepth = clamp(distanceToLight / shadowUniforms.lightPositionAndRange.w, 0.0, 1.0);
+    return float4(normalizedDepth, 0.0, 0.0, 1.0);
+}
 
 vertex VertexOut vertex_main(VertexIn in [[stage_in]],
                              constant Uniforms& uniforms [[buffer(1)]]) {
@@ -77,8 +109,11 @@ constant int DEBUG_MODE [[function_constant(0)]];
 
 fragment float4 fragment_main(VertexOut in [[stage_in]],
                               constant FragmentUniforms& fragUniforms [[buffer(0)]],
+                              constant ShadowUniforms& shadowUniforms [[buffer(1)]],
                               texture2d<float> diffuseTexture [[texture(0)]],
-                              sampler texSampler [[sampler(0)]]) {
+                              texture2d_array<float> pointShadowMap [[texture(1)]],
+                              sampler texSampler [[sampler(0)]],
+                              sampler shadowSampler [[sampler(1)]]) {
     Light light = fragUniforms.light;
     MaterialUniforms mat = fragUniforms.material;
 
@@ -86,7 +121,7 @@ fragment float4 fragment_main(VertexOut in [[stage_in]],
     float3 V = normalize(fragUniforms.cameraPosition.xyz - in.worldPosition);
 
     // Point light
-    float3 lightVec = light.position.xyz - in.worldPosition;
+    float3 lightVec = light.positionAndRange.xyz - in.worldPosition;
     float dist = length(lightVec);
     float3 L = lightVec / dist;
     float attenuation = 1.0 / (1.0 + 0.09 * dist + 0.032 * dist * dist);
@@ -151,7 +186,80 @@ fragment float4 fragment_main(VertexOut in [[stage_in]],
         return float4(ambient, 1.0);
     }
 
-    // Mode 0: normal rendering
-    float3 litColor = (ambient + diffuse) * baseColor + specular;
+    // --- Point light shadow map array ---
+    float3 lightToFragment = in.worldPosition - shadowUniforms.lightPositionAndRange.xyz;
+    float currentDepth = length(lightToFragment) / shadowUniforms.lightPositionAndRange.w;
+    float3 absDir = abs(lightToFragment);
+
+    uint face = 0;
+    float3 forward = float3(1.0, 0.0, 0.0);
+    float3 right = float3(0.0, 0.0, -1.0);
+    float3 up = float3(0.0, -1.0, 0.0);
+
+    if (absDir.x >= absDir.y && absDir.x >= absDir.z) {
+        if (lightToFragment.x >= 0.0) {
+            face = 0;
+            forward = float3(1.0, 0.0, 0.0);
+            right = float3(0.0, 0.0, -1.0);
+            up = float3(0.0, -1.0, 0.0);
+        } else {
+            face = 1;
+            forward = float3(-1.0, 0.0, 0.0);
+            right = float3(0.0, 0.0, 1.0);
+            up = float3(0.0, -1.0, 0.0);
+        }
+    } else if (absDir.y >= absDir.z) {
+        if (lightToFragment.y >= 0.0) {
+            face = 2;
+            forward = float3(0.0, 1.0, 0.0);
+            right = float3(1.0, 0.0, 0.0);
+            up = float3(0.0, 0.0, 1.0);
+        } else {
+            face = 3;
+            forward = float3(0.0, -1.0, 0.0);
+            right = float3(1.0, 0.0, 0.0);
+            up = float3(0.0, 0.0, -1.0);
+        }
+    } else {
+        if (lightToFragment.z >= 0.0) {
+            face = 4;
+            forward = float3(0.0, 0.0, 1.0);
+            right = float3(1.0, 0.0, 0.0);
+            up = float3(0.0, -1.0, 0.0);
+        } else {
+            face = 5;
+            forward = float3(0.0, 0.0, -1.0);
+            right = float3(-1.0, 0.0, 0.0);
+            up = float3(0.0, -1.0, 0.0);
+        }
+    }
+
+    float faceDepth = max(dot(forward, lightToFragment), 0.0001);
+    float2 shadowUV = float2(dot(right, lightToFragment), -dot(up, lightToFragment)) / faceDepth;
+    shadowUV = shadowUV * 0.5 + 0.5;
+    float closestDepth = pointShadowMap.sample(shadowSampler, shadowUV, face).r;
+
+    if (DEBUG_MODE == 10) {
+        return float4(float3(closestDepth), 1.0);
+    }
+
+    float shadow = 1.0;
+    if (shadowUniforms.shadowEnabled && mat.receivesShadow && currentDepth <= 1.0) {
+        float bias = max(0.008 * (1.0 - dot(N, L)), 0.003);
+        float2 texelSize = 2.5 / float2(pointShadowMap.get_width(), pointShadowMap.get_height());
+        float visibility = 0.0;
+
+        for (int y = -1; y <= 1; ++y) {
+            for (int x = -1; x <= 1; ++x) {
+                float2 sampleUV = shadowUV + float2(x, y) * texelSize;
+                float sampleDepth = pointShadowMap.sample(shadowSampler, sampleUV, face).r;
+                visibility += (currentDepth - bias > sampleDepth) ? 0.0 : 1.0;
+            }
+        }
+        shadow = visibility / 9.0;
+    }
+
+    // Mode 0: normal rendering (with shadows)
+    float3 litColor = ambient * baseColor + shadow * (diffuse * baseColor + specular);
     return float4(litColor, in.color.a);
 }
